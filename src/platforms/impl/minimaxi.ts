@@ -1,6 +1,6 @@
 /**
  * Minimaxi 平台实现
- * 参考 Python cc-status 的实现
+ * 参考 Python cc-status 的实现，KFC 风格显示
  */
 import type { BalanceFetcher, BalanceResult } from '../base.js';
 
@@ -19,7 +19,39 @@ interface MinimaxiResponse {
     current_interval_usage_count: number;
     remains_time: number;
     end_time: number;
+    start_time: number;
+    current_weekly_total_count: number;
+    current_weekly_usage_count: number;
+    weekly_end_time: number;
   }>;
+}
+
+function formatTimestamp(timestamp: number): string {
+  if (!timestamp || timestamp <= 0) {
+    return '(NoReset)';
+  }
+
+  try {
+    const date = new Date(timestamp);
+    const now = new Date();
+
+    const month = date.getMonth() + 1;
+    const day = date.getDate();
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+
+    if (date.getFullYear() === now.getFullYear() &&
+        date.getMonth() === now.getMonth() &&
+        day === now.getDate()) {
+      // Today - show only time
+      return `(${hours}:${minutes})`;
+    } else {
+      // Other dates show MM-DD HH:MM
+      return `(${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${hours}:${minutes})`;
+    }
+  } catch {
+    return '(Err)';
+  }
 }
 
 async function fetchBalance(authToken: string | undefined, _baseUrl: string | undefined): Promise<BalanceResult> {
@@ -27,7 +59,6 @@ async function fetchBalance(authToken: string | undefined, _baseUrl: string | un
     throw new Error('No auth token');
   }
 
-  // First call: get usage data
   const usageUrl = `${API_BASE}/openplatform/coding_plan/remains`;
 
   const headers = {
@@ -79,35 +110,54 @@ async function fetchBalance(authToken: string | undefined, _baseUrl: string | un
     };
   }
 
-  // Get first model's data
-  const primary = modelRemains[0];
-  const totalCount = primary.current_interval_total_count;
-  const usedCount = primary.current_interval_usage_count;
-  const endTime = primary.end_time;
+  // Find MiniMax-M* coding model
+  let codingModel = modelRemains.find(m =>
+    m.model_name.includes('MiniMax-M') || m.model_name.includes('minimax-m')
+  );
 
-  // Calculate remaining (used count is what we have left based on API naming)
-  const remainingCount = usedCount;
-  const remainingPct = totalCount > 0 ? (remainingCount / totalCount) * 100 : 0;
-
-  // Calculate reset time
-  let resetShort = 'Unknown';
-
-  if (endTime > 0) {
-    const resetDate = new Date(endTime);
-    resetShort = `${String(resetDate.getMonth() + 1).padStart(2, '0')}-${String(resetDate.getDate()).padStart(2, '0')} ${String(resetDate.getHours()).padStart(2, '0')}:${String(resetDate.getMinutes()).padStart(2, '0')}`;
+  // Fallback to first model
+  if (!codingModel) {
+    codingModel = modelRemains[0];
   }
 
-  // Color based on remaining percentage (remaining is good, depletion is bad)
-  const usageColor: 'green' | 'yellow' | 'red' = remainingPct <= 10 ? 'red' : remainingPct <= 30 ? 'yellow' : 'green';
+  // Interval data (current period)
+  const intervalTotal = codingModel.current_interval_total_count;
+  const intervalUsed = codingModel.current_interval_usage_count;
+  const intervalEndTime = codingModel.end_time;
 
-  const display = `${remainingCount}/${totalCount}(${resetShort})`;
+  // Weekly data
+  const weeklyTotal = codingModel.current_weekly_total_count ?? 0;
+  const weeklyUsed = codingModel.current_weekly_usage_count ?? 0;
+  const weeklyEndTime = codingModel.weekly_end_time ?? 0;
+
+  // Format timestamps
+  const intervalReset = formatTimestamp(intervalEndTime);
+  const weeklyReset = formatTimestamp(weeklyEndTime);
+
+  // Color based on interval remaining percentage
+  const intervalPct = intervalTotal > 0 ? (intervalUsed / intervalTotal) * 100 : 0;
+  const color: 'green' | 'yellow' | 'red' =
+    intervalPct <= 10 ? 'red' : intervalPct <= 30 ? 'yellow' : 'green';
+
+  // KFC style: interval:remaining/total(reset)|wk:weekly_used/weekly_total(weekly_reset)
+  // Show weekly data if weeklyTotal > 0 (has limit) OR weeklyUsed > 0 (has usage)
+  // When weeklyTotal is 0, it means unlimited (VIP) - show as ∞
+  let display: string;
+  if (weeklyTotal > 0) {
+    display = `interval:${intervalUsed}/${intervalTotal}${intervalReset}|wk:${weeklyUsed}/${weeklyTotal}${weeklyReset}`;
+  } else if (weeklyUsed > 0) {
+    // Has usage but no limit (VIP unlimited) - show usage with ∞
+    display = `interval:${intervalUsed}/${intervalTotal}${intervalReset}|wk:${weeklyUsed}/∞${weeklyReset}`;
+  } else {
+    display = `interval:${intervalUsed}/${intervalTotal}${intervalReset}`;
+  }
 
   return {
     platform,
-    balance: remainingCount,
+    balance: intervalUsed,
     currency: 'CNY',
     display,
-    color: usageColor,
+    color,
     raw_data: data,
   };
 }
