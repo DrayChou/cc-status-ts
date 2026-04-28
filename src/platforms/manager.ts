@@ -12,6 +12,7 @@ import { fetcher as siliconflowFetcher } from './impl/siliconflow.js';
 import { fetcher as kfcFetcher } from './impl/kfc.js';
 import { fetcher as minimaxiFetcher } from './impl/minimaxi.js';
 import { fetcher as gaccodeFetcher } from './impl/gaccode.js';
+import { fetcher as xaiAinaibahubFetcher } from './impl/xai-ainaibahub.js';
 
 const FETCHERS: Record<string, BalanceFetcher> = {
   deepseek: deepseekFetcher,
@@ -21,7 +22,9 @@ const FETCHERS: Record<string, BalanceFetcher> = {
   kfc: kfcFetcher,
   minimaxi: minimaxiFetcher,
   gaccode: gaccodeFetcher,
+  'xai.ainaibahub': xaiAinaibahubFetcher,
 };
+
 
 // 平台类型别名映射 (platform_type -> base fetcher name)
 const PLATFORM_ALIASES: Record<string, string> = {
@@ -52,6 +55,9 @@ function getAuthToken(platformType: string, config: PlatformsConfig['platforms']
       return config.auth_token || config.api_key;
     case 'glm':
       // GLM 使用 auth_token (API key)
+      return config.auth_token || config.api_key;
+    case 'xai.ainaibahub':
+      // xai.ainaibahub 使用 auth_token
       return config.auth_token || config.api_key;
     case 'deepseek':
     case 'kimi':
