@@ -1,6 +1,7 @@
 /**
  * Minimaxi 平台实现
  * 参考 Python cc-status 的实现，KFC 风格显示
+ * 适配 coding_plan/remains 新接口：返回 model_name (general/video) + remaining_percent
  */
 import type { BalanceFetcher, BalanceResult } from '../base.js';
 
@@ -8,22 +9,30 @@ export const platform = 'minimaxi';
 
 const API_BASE = 'https://www.minimaxi.com/v1/api';
 
+interface ModelRemains {
+  model_name: string;
+  start_time: number;
+  end_time: number;
+  remains_time: number;
+  current_interval_total_count: number;
+  current_interval_usage_count: number;
+  current_interval_status: number;
+  current_interval_remaining_percent: number;
+  current_weekly_total_count: number;
+  current_weekly_usage_count: number;
+  current_weekly_status: number;
+  current_weekly_remaining_percent: number;
+  weekly_start_time: number;
+  weekly_end_time: number;
+  weekly_remains_time: number;
+}
+
 interface MinimaxiResponse {
   base_resp?: {
     status_code: number;
     status_msg?: string;
   };
-  model_remains?: Array<{
-    model_name: string;
-    current_interval_total_count: number;
-    current_interval_usage_count: number;
-    remains_time: number;
-    end_time: number;
-    start_time: number;
-    current_weekly_total_count: number;
-    current_weekly_usage_count: number;
-    weekly_end_time: number;
-  }>;
+  model_remains?: ModelRemains[];
 }
 
 function formatTimestamp(timestamp: number): string {
@@ -110,51 +119,30 @@ async function fetchBalance(authToken: string | undefined, _baseUrl: string | un
     };
   }
 
-  // Find MiniMax-M* coding model
-  let codingModel = modelRemains.find(m =>
-    m.model_name.includes('MiniMax-M') || m.model_name.includes('minimax-m')
-  );
-
-  // Fallback to first model
+  // Find 'general' model (coding plan main quota); fallback to first model
+  let codingModel = modelRemains.find(m => m.model_name === 'general');
   if (!codingModel) {
     codingModel = modelRemains[0];
   }
 
-  // Interval data (current period)
-  const intervalTotal = codingModel.current_interval_total_count;
-  const intervalUsed = codingModel.current_interval_usage_count;
-  const intervalEndTime = codingModel.end_time;
-
-  // Weekly data
-  const weeklyTotal = codingModel.current_weekly_total_count ?? 0;
-  const weeklyUsed = codingModel.current_weekly_usage_count ?? 0;
-  const weeklyEndTime = codingModel.weekly_end_time ?? 0;
+  // New API only returns remaining percentage; absolute counts are 0
+  const intervalPct = codingModel.current_interval_remaining_percent ?? 0;
+  const weeklyPct = codingModel.current_weekly_remaining_percent ?? 0;
 
   // Format timestamps
-  const intervalReset = formatTimestamp(intervalEndTime);
-  const weeklyReset = formatTimestamp(weeklyEndTime);
+  const intervalReset = formatTimestamp(codingModel.end_time);
+  const weeklyReset = formatTimestamp(codingModel.weekly_end_time);
 
   // Color based on interval remaining percentage
-  const intervalPct = intervalTotal > 0 ? (intervalUsed / intervalTotal) * 100 : 0;
   const color: 'green' | 'yellow' | 'red' =
     intervalPct <= 10 ? 'red' : intervalPct <= 30 ? 'yellow' : 'green';
 
-  // KFC style: interval:remaining/total(reset)|wk:weekly_used/weekly_total(weekly_reset)
-  // Show weekly data if weeklyTotal > 0 (has limit) OR weeklyUsed > 0 (has usage)
-  // When weeklyTotal is 0, it means unlimited (VIP) - show as ∞
-  let display: string;
-  if (weeklyTotal > 0) {
-    display = `interval:${intervalUsed}/${intervalTotal}${intervalReset}|wk:${weeklyUsed}/${weeklyTotal}${weeklyReset}`;
-  } else if (weeklyUsed > 0) {
-    // Has usage but no limit (VIP unlimited) - show usage with ∞
-    display = `interval:${intervalUsed}/${intervalTotal}${intervalReset}|wk:${weeklyUsed}/∞${weeklyReset}`;
-  } else {
-    display = `interval:${intervalUsed}/${intervalTotal}${intervalReset}`;
-  }
+  // KFC style: 5h:97%(reset)|wk:99%(weekly_reset) — minimaxi interval 是 5h 窗口,与 KFC 一致
+  const display = `5h:${intervalPct}%${intervalReset}|wk:${weeklyPct}%${weeklyReset}`;
 
   return {
     platform,
-    balance: intervalUsed,
+    balance: intervalPct,
     currency: 'CNY',
     display,
     color,
