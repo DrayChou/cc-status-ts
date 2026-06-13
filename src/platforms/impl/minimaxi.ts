@@ -4,6 +4,7 @@
  * 适配 coding_plan/remains 新接口：返回 model_name (general/video) + remaining_percent
  */
 import type { BalanceFetcher, BalanceResult } from '../base.js';
+import { formatResetTime } from '../../display/time.js';
 
 export const platform = 'minimaxi';
 
@@ -33,34 +34,6 @@ interface MinimaxiResponse {
     status_msg?: string;
   };
   model_remains?: ModelRemains[];
-}
-
-function formatTimestamp(timestamp: number): string {
-  if (!timestamp || timestamp <= 0) {
-    return '(NoReset)';
-  }
-
-  try {
-    const date = new Date(timestamp);
-    const now = new Date();
-
-    const month = date.getMonth() + 1;
-    const day = date.getDate();
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-
-    if (date.getFullYear() === now.getFullYear() &&
-        date.getMonth() === now.getMonth() &&
-        day === now.getDate()) {
-      // Today - show only time
-      return `(${hours}:${minutes})`;
-    } else {
-      // Other dates show MM-DD HH:MM
-      return `(${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${hours}:${minutes})`;
-    }
-  } catch {
-    return '(Err)';
-  }
 }
 
 async function fetchBalance(authToken: string | undefined, _baseUrl: string | undefined): Promise<BalanceResult> {
@@ -130,8 +103,8 @@ async function fetchBalance(authToken: string | undefined, _baseUrl: string | un
   const weeklyPct = codingModel.current_weekly_remaining_percent ?? 0;
 
   // Format timestamps
-  const intervalReset = formatTimestamp(codingModel.end_time);
-  const weeklyReset = formatTimestamp(codingModel.weekly_end_time);
+  const intervalReset = formatResetTime(codingModel.end_time);
+  const weeklyReset = formatResetTime(codingModel.weekly_end_time);
 
   // Color based on interval remaining percentage
   const color: 'green' | 'yellow' | 'red' =

@@ -131,15 +131,13 @@ export class PlatformManager {
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        for (const { id } of items) {
-          results[id] = {
-            platform: id,
-            balance: 0,
-            currency: 'CNY',
-            display: 'Error',
-            error: errorMessage,
-          };
-        }
+        results[baseType] = {
+          platform: baseType,
+          balance: 0,
+          currency: 'CNY',
+          display: 'Error',
+          error: errorMessage,
+        };
         return;
       }
 
