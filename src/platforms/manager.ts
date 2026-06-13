@@ -98,51 +98,56 @@ export class PlatformManager {
 
   /**
    * 获取所有启用的平台余额
+   * 同 baseType 的 enabled 平台共享一次 fetch（避免共享 token 的同族平台重复调用）
    */
   async fetchAll(cacheManager: CacheManager): Promise<Record<string, PlatformBalance>> {
     const enabledPlatforms = getEnabledPlatforms(this.platformsConfig);
     const results: Record<string, PlatformBalance> = {};
 
-    // 并发获取所有平台数据
-    const promises = enabledPlatforms.map(async ({ id, config }) => {
+    // 按 baseType 分组
+    const groups = new Map<string, Array<{ id: string; config: PlatformsConfig['platforms'][string] }>>();
+    for (const { id, config } of enabledPlatforms) {
       const platformType = config.platform_type || id;
       const baseType = getBasePlatformType(platformType);
-      const fetcher = this.fetcherMap.get(baseType);
+      if (!this.fetcherMap.has(baseType)) continue;
+      if (!groups.has(baseType)) groups.set(baseType, []);
+      groups.get(baseType)!.push({ id, config });
+    }
 
-      // 如果不是已知平台，静默跳过
-      if (!fetcher) {
+    const tasks = Array.from(groups.entries()).map(async ([baseType, items]) => {
+      const fetcher = this.fetcherMap.get(baseType)!;
+      const firstConfig = items[0].config;
+      const cacheKey = `base:${baseType}`;
+
+      let result: BalanceResult;
+      try {
+        const cached = await cacheManager.getPlatformBalance<BalanceResult>(cacheKey);
+        if (cached) {
+          result = cached;
+        } else {
+          const apiKey = getAuthToken(baseType, firstConfig);
+          result = await fetcher.fetch(apiKey, firstConfig.api_base_url);
+          await cacheManager.setPlatformBalance(cacheKey, result);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        for (const { id } of items) {
+          results[id] = {
+            platform: id,
+            balance: 0,
+            currency: 'CNY',
+            display: 'Error',
+            error: errorMessage,
+          };
+        }
         return;
       }
 
-      try {
-        // 尝试从缓存获取
-        const cached = await cacheManager.getPlatformBalance<BalanceResult>(id);
-        if (cached) {
-          results[id] = this.resultToBalance(cached);
-          return;
-        }
-
-        // 获取正确的认证 token（不同平台需要不同类型的 token）
-        const apiKey = getAuthToken(baseType, config);
-        const result = await fetcher.fetch(apiKey, config.api_base_url);
-
-        // 写入缓存
-        await cacheManager.setPlatformBalance(id, result);
-
-        results[id] = this.resultToBalance(result);
-      } catch (error) {
-        // API 调用失败，显示 Error 但不打印详细错误
-        results[id] = {
-          platform: id,
-          balance: 0,
-          currency: 'CNY',
-          display: 'Error',
-          error: error instanceof Error ? error.message : 'Unknown error',
-        };
-      }
+      // 以 baseType 作 results key（同 baseType 多配置合并为 1 条）
+      results[baseType] = this.resultToBalance(result);
     });
 
-    await Promise.allSettled(promises);
+    await Promise.allSettled(tasks);
 
     return results;
   }
