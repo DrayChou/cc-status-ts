@@ -13,6 +13,7 @@ import { fetcher as kfcFetcher } from './impl/kfc.js';
 import { fetcher as minimaxiFetcher } from './impl/minimaxi.js';
 import { fetcher as gaccodeFetcher } from './impl/gaccode.js';
 import { fetcher as xaiAinaibahubFetcher } from './impl/xai-ainaibahub.js';
+import { fetcher as aicoveFetcher } from './impl/aicove.js';
 
 const FETCHERS: Record<string, BalanceFetcher> = {
   deepseek: deepseekFetcher,
@@ -23,6 +24,7 @@ const FETCHERS: Record<string, BalanceFetcher> = {
   minimaxi: minimaxiFetcher,
   gaccode: gaccodeFetcher,
   'xai.ainaibahub': xaiAinaibahubFetcher,
+  aicove: aicoveFetcher,
 };
 
 
@@ -34,11 +36,27 @@ const PLATFORM_ALIASES: Record<string, string> = {
   'oh-kfc': 'kfc',
 };
 
+// 关键词别名:platformType 包含任一 keyword (大小写不敏感) 即 alias 到 target
+const KEYWORD_ALIASES: ReadonlyArray<{ keyword: string; target: string }> = [
+  { keyword: 'aicove', target: 'aicove' },
+  { keyword: 'ai-cove', target: 'aicove' },
+];
+
 /**
  * 获取平台的基础类型
+ * 优先级: 精确别名 > 关键词别名 > 原值
  */
 function getBasePlatformType(platformType: string): string {
-  return PLATFORM_ALIASES[platformType] || platformType;
+  if (PLATFORM_ALIASES[platformType]) {
+    return PLATFORM_ALIASES[platformType];
+  }
+  const lower = platformType.toLowerCase();
+  for (const { keyword, target } of KEYWORD_ALIASES) {
+    if (lower.includes(keyword.toLowerCase())) {
+      return target;
+    }
+  }
+  return platformType;
 }
 
 /**
