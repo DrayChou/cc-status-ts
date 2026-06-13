@@ -4,6 +4,7 @@
  * 余额/订阅查询:钱包 + active 订阅
  */
 import type { BalanceFetcher, BalanceResult } from '../base.js';
+import { formatResetTime } from '../../display/time.js';
 
 export const platform = 'aicove';
 
@@ -43,23 +44,9 @@ interface AicoveResponse {
 }
 
 function formatUsd(amount: number): string {
+  // 0 直接返回 $0,避免 toFixed(6).replace 把 '0.000000' 替空成 '$'
+  if (amount === 0) return '$0';
   return `$${amount.toFixed(6).replace(/\.?0+$/, '')}`;
-}
-
-function formatResetTime(timestampSec: number): string {
-  if (!timestampSec || timestampSec <= 0) return '(NoReset)';
-  const date = new Date(timestampSec * 1000);
-  const now = new Date();
-  const month = date.getMonth() + 1;
-  const day = date.getDate();
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  if (date.getFullYear() === now.getFullYear() &&
-      date.getMonth() === now.getMonth() &&
-      day === now.getDate()) {
-    return `(${hours}:${minutes})`;
-  }
-  return `(${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${hours}:${minutes})`;
 }
 
 async function fetchBalance(apiKey: string | undefined, _baseUrl: string | undefined): Promise<BalanceResult> {
@@ -78,6 +65,9 @@ async function fetchBalance(apiKey: string | undefined, _baseUrl: string | undef
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('invalid_token');
+    }
     if (response.status === 403) {
       throw new Error('token_disabled');
     }
@@ -105,7 +95,7 @@ async function fetchBalance(apiKey: string | undefined, _baseUrl: string | undef
   const balance = wallet.remaining_amount;
 
   if (activeSub) {
-    const resetTime = formatResetTime(activeSub.next_reset_time || activeSub.end_time);
+    const resetTime = formatResetTime(activeSub.next_reset_time || activeSub.end_time, 'sec');
     if (activeSub.unlimited) {
       display = `sub:∞${resetTime}|wallet:${walletDisplay}`;
       color = 'green';
