@@ -71,6 +71,9 @@ async function fetchBalance(apiKey: string | undefined, _baseUrl: string | undef
     if (response.status === 403) {
       throw new Error('token_disabled');
     }
+    if (response.status === 429) {
+      throw new Error('rate_limited');
+    }
     throw new Error(`API error: ${response.status}`);
   }
 
