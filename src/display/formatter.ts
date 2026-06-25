@@ -14,13 +14,48 @@ const gitSymbols = {
 };
 
 export function formatBalance(_platform: string, balance: PlatformBalance, name: string): string {
-  const displayText = balance.display;
+  // 1) 过期缓存兜底:显示余额 + 过期时长 + 错误短码,黄色
+  if (balance.stale && balance.display) {
+    const ageStr = formatStaleAge(balance.staleAgeMs);
+    const reason = shortReason(balance.error);
+    const text = reason
+      ? `${balance.display} ~${ageStr}[${reason}]`
+      : `${balance.display} ~${ageStr}`;
+    return `${name}:${colorize(text, 'yellow')}`;
+  }
 
+  // 2) 硬错误(无 stale 可用):显示短码,亮红
+  if (balance.error) {
+    const reason = shortReason(balance.error);
+    return `${name}:${colorize(`Error:${reason}`, 'brightRed')}`;
+  }
+
+  // 3) 正常路径
+  const displayText = balance.display;
   const colored = balance.color
     ? colorize(displayText, getColorName(balance.color))
     : displayText;
-
   return `${name}:${colored}`;
+}
+
+function shortReason(err: string | undefined): string {
+  if (!err) return '';
+  if (err === 'rate_limited') return 'rate_ltd';
+  if (err === 'invalid_token') return 'bad_token';
+  if (err === 'token_disabled') return 'disabled';
+  if (err === 'fetch_in_flight') return 'busy';
+  const stripped = err.replace(/^API error:\s*/, '');
+  return stripped.length > 16 ? stripped.slice(0, 15) + '…' : stripped;
+}
+
+function formatStaleAge(ms: number | undefined): string {
+  if (!ms || ms < 0) return 'stale';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h`;
 }
 
 function getColorName(color: 'green' | 'yellow' | 'red'): string {
