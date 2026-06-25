@@ -169,7 +169,7 @@ function renderBalancesParts(
   const balanceParts: string[] = [];
 
   for (const [id, balance] of Object.entries(ctx.platforms)) {
-    const name = _platformsConfig.platforms[id]?.name || id;
+    const name = balance.name || _platformsConfig.platforms[id]?.name || id;
     const formatted = formatBalance(id, balance, name);
     balanceParts.push(formatted);
   }

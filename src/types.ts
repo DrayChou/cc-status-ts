@@ -110,12 +110,15 @@ export interface StatusConfig {
  */
 export interface PlatformBalance {
   platform: string;
+  name?: string;
   balance: number;
   currency: string;
   unit?: string;
   display: string;
   color?: 'green' | 'yellow' | 'red';
   error?: string;
+  stale?: boolean;
+  staleAgeMs?: number;
 }
 
 /**
