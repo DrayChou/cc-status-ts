@@ -4,7 +4,7 @@
 import type { PlatformsConfig, PlatformBalance } from '../types.js';
 import type { BalanceFetcher, BalanceResult } from './base.js';
 import { getEnabledPlatforms } from '../config/index.js';
-import { CacheManager } from '../cache/index.js';
+import { CacheManager, MIN_REFRESH_MS } from '../cache/index.js';
 import { fetcher as deepseekFetcher } from './impl/deepseek.js';
 import { fetcher as kimiFetcher } from './impl/kimi.js';
 import { fetcher as glmFetcher } from './impl/glm.js';
@@ -27,8 +27,6 @@ const FETCHERS: Record<string, BalanceFetcher> = {
   aicove: aicoveFetcher,
 };
 
-
-// 平台类型别名映射 (platform_type -> base fetcher name)
 const PLATFORM_ALIASES: Record<string, string> = {
   'glm-xianyu2': 'glm',
   'glm-xianyu1': 'glm',
@@ -36,16 +34,11 @@ const PLATFORM_ALIASES: Record<string, string> = {
   'oh-kfc': 'kfc',
 };
 
-// 关键词别名:platformType 包含任一 keyword (大小写不敏感) 即 alias 到 target
 const KEYWORD_ALIASES: ReadonlyArray<{ keyword: string; target: string }> = [
   { keyword: 'aicove', target: 'aicove' },
   { keyword: 'ai-cove', target: 'aicove' },
 ];
 
-/**
- * 获取平台的基础类型
- * 优先级: 精确别名 > 关键词别名 > 原值
- */
 function getBasePlatformType(platformType: string): string {
   if (PLATFORM_ALIASES[platformType]) {
     return PLATFORM_ALIASES[platformType];
@@ -59,32 +52,31 @@ function getBasePlatformType(platformType: string): string {
   return platformType;
 }
 
-/**
- * 根据平台类型选择正确的认证 token
- * 不同平台使用不同类型的 token
- */
 function getAuthToken(platformType: string, config: PlatformsConfig['platforms'][string]): string | undefined {
   switch (platformType) {
     case 'kfc':
-      // KFC 需要 login_token (JWT)，不能用 auth_token (API key)
       return config.login_token || config.auth_token;
     case 'minimaxi':
-      // Minimaxi 使用 auth_token
       return config.auth_token || config.api_key;
     case 'glm':
-      // GLM 使用 auth_token (API key)
       return config.auth_token || config.api_key;
     case 'xai.ainaibahub':
-      // xai.ainaibahub 使用 auth_token
       return config.auth_token || config.api_key;
     case 'deepseek':
     case 'kimi':
     case 'siliconflow':
     case 'gaccode':
     default:
-      // 默认优先级: api_key > auth_token > login_token
       return config.api_key || config.auth_token || config.login_token;
   }
+}
+
+type ErrorCategory = 'rate_limited' | 'transient' | 'fatal';
+
+function classifyError(msg: string): ErrorCategory {
+  if (msg === 'rate_limited' || msg.includes('429')) return 'rate_limited';
+  if (msg === 'invalid_token' || msg === 'token_disabled' || msg === 'No API key') return 'fatal';
+  return 'transient';
 }
 
 export class PlatformManager {
@@ -97,14 +89,16 @@ export class PlatformManager {
   }
 
   /**
-   * 获取所有启用的平台余额
-   * 同 baseType 的 enabled 平台共享一次 fetch（避免共享 token 的同族平台重复调用）
+   * 获取所有启用的平台余额。
+   * - 同 baseType 共享一次 fetch(避免共享 token 同族重复请求)
+   * - 60s 内不重复请求(MIN_REFRESH_MS)
+   * - 多进程通过 fetch lock 去重,避免 cold cache 时并发冲击
+   * - 失败时若有过期缓存,按错误分类决定是否兜底
    */
   async fetchAll(cacheManager: CacheManager): Promise<Record<string, PlatformBalance>> {
     const enabledPlatforms = getEnabledPlatforms(this.platformsConfig);
     const results: Record<string, PlatformBalance> = {};
 
-    // 按 baseType 分组
     const groups = new Map<string, Array<{ id: string; config: PlatformsConfig['platforms'][string] }>>();
     for (const { id, config } of enabledPlatforms) {
       const platformType = config.platform_type || id;
@@ -118,31 +112,74 @@ export class PlatformManager {
       const fetcher = this.fetcherMap.get(baseType)!;
       const firstConfig = items[0].config;
       const cacheKey = `base:${baseType}`;
+      const ttlMs = 5 * 60 * 1000;
 
-      let result: BalanceResult;
-      try {
-        const cached = await cacheManager.getPlatformBalance<BalanceResult>(cacheKey);
-        if (cached) {
-          result = cached;
+      const sr = await cacheManager.getPlatformBalanceWithStale<BalanceResult>(cacheKey, ttlMs);
+      let result: BalanceResult | null = null;
+      let errorMessage: string | null = null;
+      let staleAge = 0;
+
+      // 1) 缓存 < MIN_REFRESH_MS:直接用,不发请求
+      if (sr.fresh && sr.ageMs < MIN_REFRESH_MS) {
+        result = sr.fresh;
+      } else {
+        // 2) 尝试 fetch(锁住避免并发)
+        const gotLock = cacheManager.acquireFetchLock(cacheKey);
+        if (gotLock) {
+          try {
+            const apiKey = getAuthToken(baseType, firstConfig);
+            const fetched = await fetcher.fetch(apiKey, firstConfig.api_base_url);
+            await cacheManager.setPlatformBalanceAtomic(cacheKey, fetched);
+            result = fetched;
+          } catch (e) {
+            errorMessage = e instanceof Error ? e.message : 'Unknown error';
+          } finally {
+            cacheManager.releaseFetchLock(cacheKey);
+          }
         } else {
-          const apiKey = getAuthToken(baseType, firstConfig);
-          result = await fetcher.fetch(apiKey, firstConfig.api_base_url);
-          await cacheManager.setPlatformBalance(cacheKey, result);
+          // 另一进程在 fetch:短等后重读,避免重复请求
+          await new Promise(r => setTimeout(r, 100));
+          const sr2 = await cacheManager.getPlatformBalanceWithStale<BalanceResult>(cacheKey, ttlMs);
+          if (sr2.fresh) {
+            result = sr2.fresh;
+          } else if (sr.stale) {
+            result = sr.stale;
+            staleAge = sr.ageMs;
+          } else {
+            errorMessage = 'fetch_in_flight';
+          }
         }
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      }
+
+      // 3) fetch 失败 + 有过期缓存 + 非 fatal → 用 stale 兜底
+      if (errorMessage && !result) {
+        const category = classifyError(errorMessage);
+        if (category !== 'fatal' && sr.stale) {
+          result = sr.stale;
+          staleAge = sr.ageMs;
+          errorMessage = null;
+        }
+      }
+
+      if (result) {
+        const balance = this.resultToBalance(result);
+        if (staleAge > 0) {
+          balance.stale = true;
+          balance.staleAgeMs = staleAge;
+        }
+        balance.name = firstConfig.name || items[0].id;
+        results[baseType] = balance;
+      } else {
         results[baseType] = {
           platform: baseType,
+          name: firstConfig.name || items[0].id,
           balance: 0,
           currency: 'CNY',
           display: 'Error',
-          error: errorMessage,
+          error: errorMessage ?? 'Unknown error',
+          color: 'red',
         };
-        return;
       }
-
-      // 以 baseType 作 results key（同 baseType 多配置合并为 1 条）
-      results[baseType] = this.resultToBalance(result);
     });
 
     await Promise.allSettled(tasks);
