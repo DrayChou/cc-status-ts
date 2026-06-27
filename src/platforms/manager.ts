@@ -1,10 +1,11 @@
 /**
  * 平台管理器
  */
+import { createHash } from 'node:crypto';
 import type { PlatformsConfig, PlatformBalance } from '../types.js';
 import type { BalanceFetcher, BalanceResult } from './base.js';
 import { getEnabledPlatforms } from '../config/index.js';
-import { CacheManager, MIN_REFRESH_MS } from '../cache/index.js';
+import { CacheManager, MIN_REFRESH_MS, FETCH_LOCK_TTL_MS } from '../cache/index.js';
 import { fetcher as deepseekFetcher } from './impl/deepseek.js';
 import { fetcher as kimiFetcher } from './impl/kimi.js';
 import { fetcher as glmFetcher } from './impl/glm.js';
@@ -71,6 +72,15 @@ function getAuthToken(platformType: string, config: PlatformsConfig['platforms']
   }
 }
 
+function fingerprintToken(token: string | undefined): string {
+  if (!token) return 'noauth';
+  return createHash('md5').update(token).digest('hex').slice(0, 12);
+}
+
+function buildProviderInstanceKey(baseType: string, config: PlatformsConfig['platforms'][string]): string {
+  return `${baseType}:${fingerprintToken(getAuthToken(baseType, config))}`;
+}
+
 type ErrorCategory = 'rate_limited' | 'transient' | 'fatal';
 
 function classifyError(msg: string): ErrorCategory {
@@ -99,19 +109,22 @@ export class PlatformManager {
     const enabledPlatforms = getEnabledPlatforms(this.platformsConfig);
     const results: Record<string, PlatformBalance> = {};
 
-    const groups = new Map<string, Array<{ id: string; config: PlatformsConfig['platforms'][string] }>>();
+    const groups = new Map<string, { baseType: string; items: Array<{ id: string; config: PlatformsConfig['platforms'][string] }> }>();
     for (const { id, config } of enabledPlatforms) {
       const platformType = config.platform_type || id;
       const baseType = getBasePlatformType(platformType);
       if (!this.fetcherMap.has(baseType)) continue;
-      if (!groups.has(baseType)) groups.set(baseType, []);
-      groups.get(baseType)!.push({ id, config });
+      const instanceKey = buildProviderInstanceKey(baseType, config);
+      if (!groups.has(instanceKey)) groups.set(instanceKey, { baseType, items: [] });
+      groups.get(instanceKey)!.items.push({ id, config });
     }
 
-    const tasks = Array.from(groups.entries()).map(async ([baseType, items]) => {
+    const tasks = Array.from(groups.entries()).map(async ([instanceKey, group]) => {
+      const { baseType, items } = group;
       const fetcher = this.fetcherMap.get(baseType)!;
       const firstConfig = items[0].config;
-      const cacheKey = `base:${baseType}`;
+      const cacheKey = `base:${instanceKey}`;
+      const resultKey = items[0].id;
       const ttlMs = 5 * 60 * 1000;
 
       const sr = await cacheManager.getPlatformBalanceWithStale<BalanceResult>(cacheKey, ttlMs);
@@ -124,7 +137,7 @@ export class PlatformManager {
         result = sr.fresh;
       } else {
         // 2) 尝试 fetch(锁住避免并发)
-        const gotLock = cacheManager.acquireFetchLock(cacheKey);
+        const gotLock = cacheManager.acquireFetchLock(cacheKey, FETCH_LOCK_TTL_MS);
         if (gotLock) {
           try {
             const apiKey = getAuthToken(baseType, firstConfig);
@@ -168,9 +181,9 @@ export class PlatformManager {
           balance.staleAgeMs = staleAge;
         }
         balance.name = firstConfig.name || items[0].id;
-        results[baseType] = balance;
+        results[resultKey] = balance;
       } else {
-        results[baseType] = {
+        results[resultKey] = {
           platform: baseType,
           name: firstConfig.name || items[0].id,
           balance: 0,

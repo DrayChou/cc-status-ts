@@ -8,6 +8,8 @@ import * as os from 'node:os';
 
 /** 最小刷新间隔: 缓存 < 此时间不应触发新请求 */
 export const MIN_REFRESH_MS = 60_000;
+/** provider 查询锁 TTL: 覆盖慢接口/弱网，避免请求尚未结束锁就过期 */
+export const FETCH_LOCK_TTL_MS = 30_000;
 
 interface CacheEntry<T> {
   data: T;
@@ -26,30 +28,36 @@ export interface StaleResult<T> {
 
 export class CacheManager {
   private cacheDir: string;
+  private legacyCacheDir: string;
 
   constructor(cacheDir?: string) {
-    this.cacheDir = cacheDir || path.join(os.homedir(), '.claude', 'cache');
+    this.legacyCacheDir = path.join(os.homedir(), '.claude', 'cache');
+    this.cacheDir = cacheDir || path.join(this.legacyCacheDir, 'provider-balances');
   }
 
   /**
    * 单次读盘,返回 fresh / stale / age。
    * - fresh: 缓存年龄 <= ttlMs,可直接使用
    * - stale: 缓存存在且可解析,可作为 fetch 失败时的兜底
+   *
+   * 兼容旧路径 ~/.claude/cache/cache_{platform}_balance.json,
+   * 新写入统一落到 ~/.claude/cache/provider-balances/providers/*.json。
    */
   async getPlatformBalanceWithStale<T>(platform: string, ttlMs: number): Promise<StaleResult<T>> {
-    const file = this.getCacheFile(platform);
-    if (!fs.existsSync(file)) {
-      return { fresh: null, stale: null, ageMs: Number.POSITIVE_INFINITY };
+    const files = this.getReadableCacheFiles(platform);
+    for (const file of files) {
+      if (!fs.existsSync(file)) continue;
+      try {
+        const content = fs.readFileSync(file, 'utf-8');
+        const entry = JSON.parse(content) as CacheEntry<T>;
+        const ageMs = Date.now() - entry.cached_at;
+        const fresh = ageMs <= ttlMs ? entry.data : null;
+        return { fresh, stale: entry.data, ageMs };
+      } catch {
+        continue;
+      }
     }
-    try {
-      const content = fs.readFileSync(file, 'utf-8');
-      const entry = JSON.parse(content) as CacheEntry<T>;
-      const ageMs = Date.now() - entry.cached_at;
-      const fresh = ageMs <= ttlMs ? entry.data : null;
-      return { fresh, stale: entry.data, ageMs };
-    } catch {
-      return { fresh: null, stale: null, ageMs: Number.POSITIVE_INFINITY };
-    }
+    return { fresh: null, stale: null, ageMs: Number.POSITIVE_INFINITY };
   }
 
   /**
@@ -76,10 +84,10 @@ export class CacheManager {
    * 跨进程 fetch 去重锁。
    * 用 fs.openSync(path, 'wx') 做原子独占创建;已存在则检查 mtime,
    * 锁文件超过 ttlMs 视为过期,unlink 后重试。
-   * 拿到锁会写入 {pid, ts} 以便 releaseFetchLock 校验归属。
+   * 拿到锁会写入 {pid, ts, platform} 以便 releaseFetchLock 校验归属和排障。
    * 拿不到立即返回 false,不抛(statusline 必须能渲染)。
    */
-  acquireFetchLock(platform: string, ttlMs: number = 1500): boolean {
+  acquireFetchLock(platform: string, ttlMs: number = FETCH_LOCK_TTL_MS): boolean {
     const lockFile = this.getLockFile(platform);
     const dir = path.dirname(lockFile);
     // 确保 dir 存在(冷启动场景:全新用户/首次安装 cache dir 不存在)
@@ -91,7 +99,7 @@ export class CacheManager {
       try {
         const fd = fs.openSync(lockFile, 'wx');
         try {
-          fs.writeSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+          fs.writeSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now(), platform }));
         } finally {
           fs.closeSync(fd);
         }
@@ -132,11 +140,26 @@ export class CacheManager {
     }
   }
 
+  private getReadableCacheFiles(platform: string): string[] {
+    return [
+      this.getCacheFile(platform),
+      this.getLegacyCacheFile(platform),
+    ];
+  }
+
   private getCacheFile(platform: string): string {
-    return path.join(this.cacheDir, `cache_${platform}_balance.json`);
+    return path.join(this.cacheDir, 'providers', `${this.encodeKey(platform)}.json`);
+  }
+
+  private getLegacyCacheFile(platform: string): string {
+    return path.join(this.legacyCacheDir, `cache_${platform}_balance.json`);
   }
 
   private getLockFile(platform: string): string {
-    return path.join(this.cacheDir, `lock_${platform}.lock`);
+    return path.join(this.cacheDir, 'locks', `${this.encodeKey(platform)}.lock`);
+  }
+
+  private encodeKey(key: string): string {
+    return encodeURIComponent(key);
   }
 }
